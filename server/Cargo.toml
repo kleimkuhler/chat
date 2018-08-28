@@ -1,0 +1,11 @@
+[package]
+name = "server"
+version = "0.1.0"
+authors = ["Kevin Leimkuhler <kevin@kleimkuhler.com>"]
+
+[dependencies]
+bincode = "1.0.1"
+futures = "0.1.23"
+serde = "1.0.75"
+serde_derive = "1.0.75"
+tokio = "0.1.8"

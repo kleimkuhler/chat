@@ -1,0 +1,9 @@
+[package]
+name = "client"
+version = "0.1.0"
+authors = ["Kevin Leimkuhler <kevin@kleimkuhler.com>"]
+
+[dependencies]
+bytes = "0.4.9"
+futures = "0.1.23"
+tokio = "0.1.8"
