@@ -10,18 +10,23 @@ use tokio::net::TcpListener;
 use tokio::prelude::*;
 
 use std::collections::HashMap;
+use std::env;
 use std::io::BufReader;
 use std::iter;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+/// `MessageKind` is used to indicate if an incoming message is a `Response` or `Text` so that the
+/// receiver can decide whether to create an acknowledgment or not.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 enum MessageKind {
     Response,
     Text,
 }
 
+/// `Message` is used to package the fields required for constructing an acknowledgment. This
+/// involves the `kind`, `sender`, and `timestamp` fields.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 struct Message {
     kind: MessageKind,
@@ -30,20 +35,20 @@ struct Message {
     timestamp: SystemTime,
 }
 
-impl Message {
-    fn new(kind: MessageKind, text: String, sender: SocketAddr, timestamp: SystemTime) -> Message {
-        Message {
-            kind,
-            text,
-            sender,
-            timestamp,
-        }
-    }
-}
-
 fn main() {
-    // Create the TCP listener to accept connections on
-    let addr = "127.0.0.1:12345".parse::<SocketAddr>().unwrap();
+    let args = env::args().skip(1).collect::<Vec<_>>();
+
+    // Panic if no arguments are passed along to the program
+    let addr = args
+        .first()
+        .unwrap_or_else(|| panic!("this program requires at least one argument"));
+
+    // Panic if the argument passed along is not <SocketAddr> format
+    let addr = addr
+        .parse::<SocketAddr>()
+        .unwrap_or_else(|_| panic!("argument must be a valid <SocketAddr>"));
+
+    // Create the TCP Listener to accept connections on `addr`
     let listener = TcpListener::bind(&addr).unwrap();
     println!("Listening on: {}", addr);
 
@@ -67,14 +72,14 @@ fn main() {
             let (tx, rx) = futures::sync::mpsc::unbounded();
             clients.lock().unwrap().insert(addr, tx);
 
-            // Buffer the reader and model the read portion of the socket with an infinite iterator
+            // Buffer the reader. Model the read portion of the socket with an infinite iterator
             let reader = BufReader::new(reader);
             let message_stream = stream::iter_ok::<_, io::Error>(iter::repeat(()));
 
             // Clone `clients` to prepare for moving into closure
-            let clients_reader = clients.clone();
+            let readers_clients = clients.clone();
 
-            // Whenever data is received on the transmitter, read it to `client_reader`
+            // Whenever data is received on the Sender, read it to `client_reader`
             let client_reader = message_stream.fold(reader, move |reader, _| {
                 let line = io::read_until(reader, b'\n', Vec::new());
                 let line = line.and_then(|(reader, data)| {
@@ -89,7 +94,7 @@ fn main() {
                 let line = line.map(|(reader, data)| (reader, String::from_utf8(data)));
 
                 // Clone `clients_reader` to prepare for moving into closure
-                let clients = clients_reader.clone();
+                let clients = readers_clients.clone();
 
                 // Send a <Message> to each client on the server except the current one
                 line.map(move |(reader, text)| {
@@ -97,14 +102,15 @@ fn main() {
 
                     // Create a <Message> with current client data and serialize it
                     if let Ok(txt) = text {
-                        let message = Message::new(
-                            MessageKind::Text,
-                            txt.to_string(),
-                            addr,
-                            SystemTime::now(),
-                        );
+                        let message = Message {
+                            kind: MessageKind::Text,
+                            text: txt.to_string(),
+                            sender: addr,
+                            timestamp: SystemTime::now(),
+                        };
                         let encoded = serialize(&message).unwrap();
 
+                        // Send `encoded` to all connected clients
                         let iter = filtered_clients
                             .iter_mut()
                             .filter(|&(&k, _)| k != addr)
@@ -118,24 +124,24 @@ fn main() {
                 })
             });
 
-            // Clone `addr` and `clients` to prepare for moving into closure
-            let clients_writer = clients.clone();
+            // Clone `clients` to prepare for moving into closure
+            let writers_clients = clients.clone();
 
             // Whenever data is received on the Receiver, write it to the `client_writer`
             let client_writer = rx.fold(writer, move |writer, encoded| {
                 // Deserialize the encoded mesage
                 let decoded: Message = deserialize(&encoded).unwrap();
 
+                // Create and send acknowledgement if message is <MessageKind::Text>
                 if let MessageKind::Text = decoded.kind {
-                    let clients = clients_writer.lock().unwrap();
+                    let clients = writers_clients.lock().unwrap();
 
-                    // Create a <Message> to send acknowledgment back to sender
-                    let response = Message::new(
-                        MessageKind::Response,
-                        "".to_string(),
-                        addr,
-                        decoded.timestamp,
-                    );
+                    let response = Message {
+                        kind: MessageKind::Response,
+                        text: "".to_string(),
+                        sender: addr,
+                        timestamp: decoded.timestamp,
+                    };
                     let encoded = serialize(&response).unwrap();
 
                     let tx = clients.get(&decoded.sender).unwrap();
@@ -155,9 +161,9 @@ fn main() {
                     }
                     MessageKind::Text => format!("{}: {}", decoded.sender, decoded.text),
                 };
-                let amt = io::write_all(writer, message);
-                let amt = amt.map(|(writer, _)| writer);
-                amt.map_err(|_| ())
+                let result = io::write_all(writer, message);
+                let result = result.map(|(writer, _)| writer);
+                result.map_err(|_| ())
             });
 
             // Use the `select` combinator to wait for either half of the client's socket to close
