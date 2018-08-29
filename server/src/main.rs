@@ -1,5 +1,3 @@
-#![allow(unused_imports)]
-
 extern crate bincode;
 extern crate futures;
 #[macro_use]
@@ -16,7 +14,7 @@ use std::io::BufReader;
 use std::iter;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 enum MessageKind {
@@ -74,7 +72,7 @@ fn main() {
             let message_stream = stream::iter_ok::<_, io::Error>(iter::repeat(()));
 
             // Clone `clients` to prepare for moving into closure
-            let clients_inner = clients.clone();
+            let clients_reader = clients.clone();
 
             // Whenever data is received on the transmitter, read it to `client_reader`
             let client_reader = message_stream.fold(reader, move |reader, _| {
@@ -90,8 +88,8 @@ fn main() {
                 // Convert the bytes read into a <String>
                 let line = line.map(|(reader, data)| (reader, String::from_utf8(data)));
 
-                // Clone `clients_inner` to prepare for moving into closure
-                let clients = clients_inner.clone();
+                // Clone `clients_reader` to prepare for moving into closure
+                let clients = clients_reader.clone();
 
                 // Send a <Message> to each client on the server except the current one
                 line.map(move |(reader, text)| {
@@ -99,8 +97,12 @@ fn main() {
 
                     // Create a <Message> with current client data and serialize it
                     if let Ok(txt) = text {
-                        let message =
-                            Message::new(MessageKind::Text, txt.clone(), addr, UNIX_EPOCH);
+                        let message = Message::new(
+                            MessageKind::Text,
+                            txt.to_string(),
+                            addr,
+                            SystemTime::now(),
+                        );
                         let encoded = serialize(&message).unwrap();
 
                         let iter = filtered_clients
@@ -116,16 +118,43 @@ fn main() {
                 })
             });
 
+            // Clone `addr` and `clients` to prepare for moving into closure
+            let clients_writer = clients.clone();
+
             // Whenever data is received on the Receiver, write it to the `client_writer`
-            let client_writer = rx.fold(writer, |writer, encoded| {
+            let client_writer = rx.fold(writer, move |writer, encoded| {
                 // Deserialize the encoded mesage
                 let decoded: Message = deserialize(&encoded).unwrap();
 
-                // Create a <String> to write to the client
-                let message = format!(
-                    "{} ({:?}): {}",
-                    decoded.sender, decoded.timestamp, decoded.text
-                );
+                if let MessageKind::Text = decoded.kind {
+                    let clients = clients_writer.lock().unwrap();
+
+                    // Create a <Message> to send acknowledgment back to sender
+                    let response = Message::new(
+                        MessageKind::Response,
+                        "".to_string(),
+                        addr,
+                        decoded.timestamp,
+                    );
+                    let encoded = serialize(&response).unwrap();
+
+                    let tx = clients.get(&decoded.sender).unwrap();
+                    tx.unbounded_send(encoded.clone()).unwrap();
+                }
+
+                let message = match decoded.kind {
+                    MessageKind::Response => {
+                        let now = SystemTime::now();
+                        let roundtrip = now.duration_since(decoded.timestamp).unwrap();
+                        format!(
+                            "Roundtrip time to {} was {{ {} secs {} ns}}\n",
+                            decoded.sender,
+                            roundtrip.as_secs(),
+                            roundtrip.subsec_nanos()
+                        )
+                    }
+                    MessageKind::Text => format!("{}: {}", decoded.sender, decoded.text),
+                };
                 let amt = io::write_all(writer, message);
                 let amt = amt.map(|(writer, _)| writer);
                 amt.map_err(|_| ())
