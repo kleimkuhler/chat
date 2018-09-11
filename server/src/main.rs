@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::env;
 use std::io::BufReader;
 use std::iter;
+use std::mem;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -81,7 +82,8 @@ fn main() {
 
             // Whenever data is received on the Sender, read it to `client_reader`
             let client_reader = message_stream.fold(reader, move |reader, _| {
-                let line = io::read_until(reader, b'\n', Vec::new());
+                let line = io::read_until(reader, 0x04 as u8, Vec::new());
+
                 let line = line.and_then(|(reader, data)| {
                     if data.len() != 0 {
                         Ok((reader, data))
@@ -90,8 +92,18 @@ fn main() {
                     }
                 });
 
-                // Convert the bytes read into a <String>
-                let line = line.map(|(reader, data)| (reader, String::from_utf8(data)));
+                // Let's not assume valid UTF-8 input. Convert the raw bytes read into a <String>
+                let line = line.map(|(reader, data)| unsafe {
+                    let ptr = data.as_ptr();
+                    let len = data.len();
+                    let capacity = data.capacity();
+
+                    mem::forget(data);
+
+                    let s = String::from_raw_parts(ptr as *mut _, len, capacity);
+
+                    (reader, s)
+                });
 
                 // Clone `clients_reader` to prepare for moving into closure
                 let clients = readers_clients.clone();
@@ -101,23 +113,21 @@ fn main() {
                     let mut filtered_clients = clients.lock().unwrap();
 
                     // Create a <Message> with current client data and serialize it
-                    if let Ok(txt) = text {
-                        let message = Message {
-                            kind: MessageKind::Text,
-                            text: txt.to_string(),
-                            sender: addr,
-                            timestamp: SystemTime::now(),
-                        };
-                        let encoded = serialize(&message).unwrap();
+                    let message = Message {
+                        kind: MessageKind::Text,
+                        text: text.to_string(),
+                        sender: addr,
+                        timestamp: SystemTime::now(),
+                    };
+                    let encoded = serialize(&message).unwrap();
 
-                        // Send `encoded` to all connected clients
-                        let iter = filtered_clients
-                            .iter_mut()
-                            .filter(|&(&k, _)| k != addr)
-                            .map(|(_, v)| v);
-                        for client in iter {
-                            client.unbounded_send(encoded.clone()).unwrap();
-                        }
+                    // Send `encoded` to all connected clients
+                    let iter = filtered_clients
+                        .iter_mut()
+                        .filter(|&(&k, _)| k != addr)
+                        .map(|(_, v)| v);
+                    for client in iter {
+                        client.unbounded_send(encoded.clone()).unwrap();
                     }
 
                     reader
