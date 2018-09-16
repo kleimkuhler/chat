@@ -82,13 +82,13 @@ fn main() {
 
             // Whenever data is received on the Sender, read it to `client_reader`
             let client_reader = message_stream.fold(reader, move |reader, _| {
-                let line = io::read_until(reader, 0x04 as u8, Vec::new());
-
+                // Read a line off the socket, failing if we're at EOF
+                let line = io::read_until(reader, b'\n', Vec::new());
                 let line = line.and_then(|(reader, data)| {
-                    if data.len() != 0 {
-                        Ok((reader, data))
-                    } else {
+                    if data.len() == 0 {
                         Err(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"))
+                    } else {
+                        Ok((reader, data))
                     }
                 });
 
