@@ -98,16 +98,19 @@ impl Future for Client {
         for i in 0..LINES_PER_TICK {
             match self.recv.poll().unwrap() {
                 Async::Ready(Some(v)) => {
-                    let dispatched: Message = deserialize(v.as_ref()).unwrap();
-                    let message = format!("{} - {}", dispatched.name, dispatched.text);
-                    self.frames.start_send(Bytes::from(message))?;
+                    // let dispatched: Message = deserialize(v.as_ref()).unwrap();
+                    // let message = format!("{} - {}", dispatched.name, dispatched.text);
+
+                    println!("Received frame ({:?}) : ({:?})", v.len(), v);
+
+                    self.frames.start_send(v)?;
 
                     if i + 1 == LINES_PER_TICK {
                         task::current().notify();
                     }
                 }
 
-                _ => (),
+                _ => break,
             }
         }
 
@@ -117,10 +120,12 @@ impl Future for Client {
             println!("Received line ({:?}) : {:?}", self.addr, frame);
 
             if let Some(message) = frame {
-                let dispatch = self.make_dispatch(message, self.name.clone());
+                // let dispatch = self.make_dispatch(message, self.name.clone());
+                let message = message.freeze();
+
                 for (addr, tx) in &self.state.lock().unwrap().clients {
                     if *addr != self.addr {
-                        tx.unbounded_send(Bytes::from(dispatch.clone())).unwrap();
+                        tx.unbounded_send(message.clone()).unwrap();
                     }
                 }
             } else {
