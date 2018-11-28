@@ -1,7 +1,11 @@
+extern crate bincode;
 extern crate bytes;
 extern crate futures;
+#[macro_use]
+extern crate serde_derive;
 extern crate tokio;
 
+use bincode::{deserialize, serialize};
 use bytes::{Bytes, BytesMut};
 use futures::future::Future;
 use futures::sync::mpsc;
@@ -11,8 +15,10 @@ use tokio::prelude::*;
 
 use std::collections::HashMap;
 use std::io;
+use std::mem;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 type Tx = mpsc::UnboundedSender<Bytes>;
 type Rx = mpsc::UnboundedReceiver<Bytes>;
@@ -27,6 +33,31 @@ impl Shared {
     pub fn new() -> Self {
         Shared {
             clients: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+enum MessageKind {
+    Acknowledge,
+    Dispatch,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Message {
+    kind: MessageKind,
+    text: String,
+    sender: SocketAddr,
+    timestamp: SystemTime,
+}
+
+impl Message {
+    fn new(kind: MessageKind, text: String, sender: SocketAddr, timestamp: SystemTime) -> Self {
+        Self {
+            kind,
+            text,
+            sender,
+            timestamp,
         }
     }
 }
@@ -54,11 +85,21 @@ impl Future for Client {
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<(), Self::Error> {
-        match self.recv.poll().unwrap() {
-            Async::Ready(Some(v)) => {
-                self.frames.start_send(v)?;
+        const LINES_PER_TICK: usize = 10;
+
+        for i in 0..LINES_PER_TICK {
+            match self.recv.poll().unwrap() {
+                Async::Ready(Some(v)) => {
+                    let dispatched: Message = deserialize(v.as_ref()).unwrap();
+                    self.frames.start_send(Bytes::from(dispatched.text))?;
+
+                    if i + 1 == LINES_PER_TICK {
+                        task::current().notify();
+                    }
+                }
+
+                _ => (),
             }
-            _ => (),
         }
 
         self.frames.poll_complete()?;
@@ -67,16 +108,10 @@ impl Future for Client {
             println!("Received line ({:?}) : {:?}", self.addr, frame);
 
             if let Some(message) = frame {
+                let dispatch = self.make_dispatch(message);
                 for (addr, tx) in &self.state.lock().unwrap().clients {
                     if *addr != self.addr {
-                        let mut line = self.name.clone();
-                        line.extend_from_slice(b": ");
-                        line.extend_from_slice(&message);
-                        line.extend_from_slice(b"\r\n");
-
-                        let line = line.freeze();
-
-                        tx.unbounded_send(line.clone()).unwrap();
+                        tx.unbounded_send(Bytes::from(dispatch.clone())).unwrap();
                     }
                 }
             } else {
@@ -115,6 +150,19 @@ impl Client {
             state,
             recv,
         }
+    }
+
+    fn make_dispatch(&self, bytes: BytesMut) -> Vec<u8> {
+        let raw = unsafe {
+            let ptr = bytes.as_ptr();
+            let len = bytes.len();
+            let cap = bytes.capacity();
+
+            mem::forget(bytes);
+            String::from_raw_parts(ptr as *mut _, len, cap)
+        };
+        let msg = Message::new(MessageKind::Dispatch, raw, self.addr, SystemTime::now());
+        serialize(&msg).unwrap()
     }
 }
 
