@@ -126,7 +126,7 @@ impl Future for Client {
         // While there are values in the client stream, pull them out and
         // dispatch to all connected clients
         while let Async::Ready(frame) = self.frames.poll()? {
-            println!("Received line ({:?}) : {:?}", self.addr, frame);
+            println!("Received frame ({:?}) : {:?}", self.addr, frame);
 
             if let Some(message) = frame {
                 let dispatch = self.handle_input(message);
@@ -205,44 +205,30 @@ impl Client {
         let sender = clients.get(&message.addr).unwrap();
         sender.unbounded_send(Bytes::from(acknowledge)).unwrap();
 
+        // Construct the message to be output to all connected clients
         let mut dispatch = message.name;
         dispatch.extend_from_slice(b": ");
         dispatch.extend(message.text);
+        dispatch.extend(b"\n");
 
         dispatch.freeze()
     }
 
     /// Create a dispatch message to send to all other clients.
     fn handle_input(&self, input: BytesMut) -> Bytes {
+        let stripped = strip_newline(input);
         let message = {
             let dispatch = Message::new(
                 self.addr,
                 MessageKind::Dispatch,
                 self.name.clone(),
-                input.clone(),
+                stripped.clone(),
                 SystemTime::now(),
             );
             serialize(&dispatch).unwrap()
         };
 
         Bytes::from(message)
-    }
-}
-
-/// Convenience function for reading from stdin.
-pub fn read_stdin(mut stdin_send: mpsc::Sender<Bytes>) {
-    let mut stdin = io::stdin();
-    loop {
-        let mut buf = vec![0; 1024];
-        let n = match stdin.read(&mut buf) {
-            Err(_) | Ok(0) => break,
-            Ok(n) => n,
-        };
-        buf.truncate(n);
-        stdin_send = match stdin_send.send(Bytes::from(buf)).wait() {
-            Ok(tx) => tx,
-            Err(_) => break,
-        };
     }
 }
 
@@ -274,4 +260,36 @@ pub fn connect(
                 recv
             }).flatten_stream(),
     )
+}
+
+/// Convenience function for reading from stdin.
+pub fn read_stdin(mut stdin_send: mpsc::Sender<Bytes>) {
+    let mut stdin = io::stdin();
+    loop {
+        let mut buf = vec![0; 1024];
+        let n = match stdin.read(&mut buf) {
+            Err(_) | Ok(0) => break,
+            Ok(n) => n,
+        };
+        buf.truncate(n);
+        stdin_send = match stdin_send.send(Bytes::from(buf)).wait() {
+            Ok(tx) => tx,
+            Err(_) => break,
+        };
+    }
+}
+
+/// Convenience function for stripping newline ('\n') characters from the end
+/// of client input. This does not assume there is one to strip, but leads to
+/// cleaner server and client output.
+pub fn strip_newline(mut input: BytesMut) -> BytesMut {
+    let len = input.len();
+    match &input[len - 1] {
+        &b'\n' => {
+            input.truncate(len - 1);
+        }
+
+        _ => (),
+    };
+    input
 }

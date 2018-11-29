@@ -53,7 +53,7 @@ fn process(socket: TcpStream, state: Arc<Mutex<Shared>>) {
         .map_err(|(e, _)| e)
         .and_then(move |(name, frames)| {
             let name = match name {
-                Some(name) => name,
+                Some(mut name) => client::strip_newline(name),
                 None => {
                     return Either::A(future::ok(()));
                 }
