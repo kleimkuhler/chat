@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<std::error::Error>> {
     let listener = TcpListener::bind(&addr)?;
 
     // Create a new state for all clients to share
-    let state = Arc::new(Mutex::new(Shared::new()));
+    let state = Arc::new(Mutex::new(Shared::default()));
 
     let server = listener
         .incoming()

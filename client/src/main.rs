@@ -36,6 +36,8 @@ fn main() -> Result<(), Box<std::error::Error>> {
     // With the stream of bytes, execute the write to stdout on the event loop
     let mut out = io::stdout();
 
+    println!("Please enter your name: ");
+
     tokio::run({
         stdout
             .for_each(move |chunk| out.write_all(&chunk))

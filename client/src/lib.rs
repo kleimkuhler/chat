@@ -24,24 +24,29 @@ type Rx = mpsc::UnboundedReceiver<Bytes>;
 
 /// `Client`s store the shared state of connections so that they can send data
 /// to the send handles of other clients.
+#[derive(Default)]
 pub struct Shared {
     clients: HashMap<SocketAddr, Tx>,
 }
 
-impl Shared {
-    pub fn new() -> Self {
-        Shared {
-            clients: HashMap::new(),
-        }
-    }
-}
+// impl Shared {
+//     pub fn new() -> Self {
+//         Shared {
+//             clients: HashMap::new(),
+//         }
+//     }
+// }
 
+/// `MessageKind` is used by the receiver to decide whether to acknowledge
+/// a sender
 #[derive(Deserialize, Serialize)]
 enum MessageKind {
     Acknowledge,
     Dispatch,
 }
 
+/// `Message` is used to package the fields required for constructing an
+/// acknowledgement that a message has been received.
 #[derive(Deserialize, Serialize)]
 struct Message {
     addr: SocketAddr,
@@ -94,11 +99,17 @@ impl Future for Client {
     fn poll(&mut self) -> Poll<(), Self::Error> {
         const LINES_PER_TICK: usize = 10;
 
+        // If the limit is hit, the current task is notified, informing the
+        // executor to schedule the task again asap.
         for i in 0..LINES_PER_TICK {
             match self.recv.poll().unwrap() {
-                Async::Ready(Some(v)) => {
-                    let dispatch: Message = deserialize(v.as_ref()).unwrap();
-                    self.frames.start_send(dispatch.text.freeze())?;
+                Async::Ready(Some(message)) => {
+                    let message: Message = deserialize(message.as_ref()).unwrap();
+                    let output = match message.kind {
+                        MessageKind::Acknowledge => self.handle_acknowledge(message),
+                        MessageKind::Dispatch => self.handle_dispatch(message),
+                    };
+                    self.frames.start_send(output)?;
 
                     if i + 1 == LINES_PER_TICK {
                         task::current().notify();
@@ -109,24 +120,19 @@ impl Future for Client {
             }
         }
 
+        // Flush all output from the client sink
         self.frames.poll_complete()?;
 
+        // While there are values in the client stream, pull them out and
+        // dispatch to all connected clients
         while let Async::Ready(frame) = self.frames.poll()? {
             println!("Received line ({:?}) : {:?}", self.addr, frame);
 
             if let Some(message) = frame {
-                let message = Message::new(
-                    self.addr,
-                    MessageKind::Dispatch,
-                    self.name.clone(),
-                    message.clone(),
-                    SystemTime::now(),
-                );
-                let dispatch = serialize(&message).unwrap();
-
+                let dispatch = self.handle_input(message);
                 for (addr, tx) in &self.state.lock().unwrap().clients {
                     if *addr != self.addr {
-                        tx.unbounded_send(Bytes::from(dispatch.clone())).unwrap();
+                        tx.unbounded_send(dispatch.clone()).unwrap();
                     }
                 }
             } else {
@@ -165,6 +171,61 @@ impl Client {
             state,
             recv,
         }
+    }
+
+    /// Create an output message for the original sender when a
+    /// `MessageKind::Acknowledge` is received.
+    fn handle_acknowledge(&self, message: Message) -> Bytes {
+        let now = SystemTime::now();
+        let roundtrip = now.duration_since(message.timestamp).unwrap();
+        let acknowledgement = format!(
+            "<--> Roundtrip time to {} was {{ {} secs {} ns}}\n",
+            message.addr,
+            roundtrip.as_secs(),
+            roundtrip.subsec_nanos()
+        );
+
+        Bytes::from(acknowledgement)
+    }
+
+    /// Create an acknowledgement message for the sender and send it back.
+    /// Then create an output message for the receiving client.
+    fn handle_dispatch(&self, message: Message) -> Bytes {
+        let acknowledge = {
+            let message = Message::new(
+                self.addr,
+                MessageKind::Acknowledge,
+                self.name.clone(),
+                BytesMut::new(),
+                message.timestamp,
+            );
+            serialize(&message).unwrap()
+        };
+        let clients = &self.state.lock().unwrap().clients;
+        let sender = clients.get(&message.addr).unwrap();
+        sender.unbounded_send(Bytes::from(acknowledge)).unwrap();
+
+        let mut dispatch = message.name;
+        dispatch.extend_from_slice(b": ");
+        dispatch.extend(message.text);
+
+        dispatch.freeze()
+    }
+
+    /// Create a dispatch message to send to all other clients.
+    fn handle_input(&self, input: BytesMut) -> Bytes {
+        let message = {
+            let dispatch = Message::new(
+                self.addr,
+                MessageKind::Dispatch,
+                self.name.clone(),
+                input.clone(),
+                SystemTime::now(),
+            );
+            serialize(&dispatch).unwrap()
+        };
+
+        Bytes::from(message)
     }
 }
 
