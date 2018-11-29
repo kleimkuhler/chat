@@ -15,7 +15,6 @@ use tokio::prelude::*;
 
 use std::collections::HashMap;
 use std::io;
-use std::mem;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -47,8 +46,8 @@ enum MessageKind {
 struct Message {
     addr: SocketAddr,
     kind: MessageKind,
-    name: String,
-    text: String,
+    name: BytesMut,
+    text: BytesMut,
     timestamp: SystemTime,
 }
 
@@ -56,8 +55,8 @@ impl Message {
     fn new(
         addr: SocketAddr,
         kind: MessageKind,
-        name: String,
-        text: String,
+        name: BytesMut,
+        text: BytesMut,
         timestamp: SystemTime,
     ) -> Self {
         Self {
@@ -98,12 +97,8 @@ impl Future for Client {
         for i in 0..LINES_PER_TICK {
             match self.recv.poll().unwrap() {
                 Async::Ready(Some(v)) => {
-                    // let dispatched: Message = deserialize(v.as_ref()).unwrap();
-                    // let message = format!("{} - {}", dispatched.name, dispatched.text);
-
-                    println!("Received frame ({:?}) : ({:?})", v.len(), v);
-
-                    self.frames.start_send(v)?;
+                    let dispatch: Message = deserialize(v.as_ref()).unwrap();
+                    self.frames.start_send(dispatch.text.freeze())?;
 
                     if i + 1 == LINES_PER_TICK {
                         task::current().notify();
@@ -120,12 +115,18 @@ impl Future for Client {
             println!("Received line ({:?}) : {:?}", self.addr, frame);
 
             if let Some(message) = frame {
-                // let dispatch = self.make_dispatch(message, self.name.clone());
-                let message = message.freeze();
+                let message = Message::new(
+                    self.addr,
+                    MessageKind::Dispatch,
+                    self.name.clone(),
+                    message.clone(),
+                    SystemTime::now(),
+                );
+                let dispatch = serialize(&message).unwrap();
 
                 for (addr, tx) in &self.state.lock().unwrap().clients {
                     if *addr != self.addr {
-                        tx.unbounded_send(message.clone()).unwrap();
+                        tx.unbounded_send(Bytes::from(dispatch.clone())).unwrap();
                     }
                 }
             } else {
@@ -164,33 +165,6 @@ impl Client {
             state,
             recv,
         }
-    }
-
-    fn make_dispatch(&self, message: BytesMut, name: BytesMut) -> Vec<u8> {
-        let text = unsafe {
-            let ptr = message.as_ptr();
-            let len = message.len();
-            let cap = message.capacity();
-
-            mem::forget(message);
-            String::from_raw_parts(ptr as *mut _, len, cap)
-        };
-        let name = unsafe {
-            let ptr = name.as_ptr();
-            let len = name.len();
-            let cap = name.capacity();
-
-            mem::forget(name);
-            String::from_raw_parts(ptr as *mut _, len, cap)
-        };
-        let message = Message::new(
-            self.addr,
-            MessageKind::Dispatch,
-            name,
-            text,
-            SystemTime::now(),
-        );
-        serialize(&message).unwrap()
     }
 }
 
